@@ -54,7 +54,7 @@ Reves.AI-Test is an intelligent chatbot agent that uses Retrieval-Augmented Gene
 * OpenAI API Key
 * Required libraries (see `requirements.txt`)
 
-###  Steps
+### Steps
 
 1. Clone the repository:
 
@@ -135,22 +135,20 @@ Reves.AI-Test is an intelligent chatbot agent that uses Retrieval-Augmented Gene
 
 A video demonstrating the functionality is available [here]().
 
----
+## RAG Implementation (Brief)
 
-## Documentation: RAG Implementation
+1. **PDF Processing with Hashing**
+   * Generates an MD5 hash of the PDF to detect changes.
+   * Regenerates embeddings only if the PDF is updated, saving computation time.
+2. **Embedding and Storage**
+   * Splits PDF into chunks (500 characters with 100 overlap).
+   * Embeds chunks using OpenAI's embedding API.
+   * Stores embeddings and metadata in a FAISS vectorstore.
+3. **RetrievalQA Chain**
+   * Retrieves relevant text chunks from FAISS.
+   * Uses GPT-based LLM to generate responses based on retrieved context and user queries.
+4. **Efficiency**
+   * Local storage and hashing ensure reusability and reduced redundancy.
 
-1. **PDF Loading**
-   * The `PyPDFLoader` from LangChain reads the PDF and extracts documents.
-2. **Text Splitting**
-   * The `RecursiveCharacterTextSplitter` divides the document into manageable chunks, ensuring overlap for context preservation.
-3. **Embedding Generation**
-   * The `OpenAIEmbeddings` class generates embeddings for document chunks.
-   * A batching strategy with retry logic is implemented for handling API rate limits.
-4. **Vectorstore Creation**
-   * FAISS is used to store embeddings, along with metadata, for fast retrieval.
-5. **Retrieval and Response Generation**
-   * A `RetrievalQA` chain is constructed with a GPT-4 model to fetch relevant document sections and generate natural language responses.
-
----
 
 Feel free to reach out for any issues or further clarifications!
