@@ -1,5 +1,3 @@
-# bot.py
-
 import os
 import time
 import hashlib
@@ -9,7 +7,6 @@ import re
 from dotenv import load_dotenv
 from tqdm import tqdm
 from openai import OpenAIError, RateLimitError
-
 # LangChain and LangChain Community Imports
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
