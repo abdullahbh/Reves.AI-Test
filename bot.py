@@ -7,17 +7,21 @@ import re
 from dotenv import load_dotenv
 from tqdm import tqdm
 from openai import OpenAIError, RateLimitError
-# LangChain and LangChain Community Imports
+
+# LangChain / Community Imports
 from langchain_community.document_loaders import PyPDFLoader
 from langchain.text_splitter import RecursiveCharacterTextSplitter
-from langchain_community.vectorstores import FAISS
 from langchain_community.embeddings import OpenAIEmbeddings
-from langchain_community.chat_models import ChatOpenAI
-from langchain.prompts import PromptTemplate
+from langchain_community.vectorstores import FAISS
+from langchain.chat_models import ChatOpenAI
+from langchain.memory import ConversationBufferMemory
+from langchain.agents import Tool, AgentType, initialize_agent
 from langchain.chains import RetrievalQA
+from langchain.prompts import PromptTemplate
 
-# Configure Logging
-logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
+# Configure logging
+logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
+
 
 def api_key():
     """
@@ -31,10 +35,13 @@ def api_key():
     openai.api_key = key
     return key
 
-# Subclass OpenAIEmbeddings to include batching and retry logic
+
 class BatchedOpenAIEmbeddings(OpenAIEmbeddings):
+    """
+    Subclass of OpenAIEmbeddings with batch processing & retry logic.
+    """
     def embed_documents(self, texts):
-        batch_size = 50  # Adjust as necessary
+        batch_size = 50
         embeddings = []
         for i in tqdm(range(0, len(texts), batch_size), desc="Embedding Documents"):
             batch = texts[i:i+batch_size]
@@ -57,9 +64,10 @@ class BatchedOpenAIEmbeddings(OpenAIEmbeddings):
                 raise Exception("Max retries exceeded for embedding requests.")
         return embeddings
 
+
 def file_hash(file_path):
     """
-    Generate an MD5 hash for the given file.
+    Generate an MD5 hash for the given file to check for updates.
     """
     hasher = hashlib.md5()
     with open(file_path, 'rb') as f:
@@ -67,9 +75,10 @@ def file_hash(file_path):
         hasher.update(buf)
     return hasher.hexdigest()
 
+
 def load_and_process_local_pdf(pdf_path):
     """
-    Load the PDF, split into chunks, embed them, and create a FAISS vectorstore.
+    Load a PDF, split into chunks, embed them, and create a FAISS vector store.
     """
     loader = PyPDFLoader(pdf_path)
     docs = loader.load()
@@ -87,145 +96,156 @@ def load_and_process_local_pdf(pdf_path):
     all_embeddings = embeddings.embed_documents(all_texts)
     logging.info("Generated embeddings for all document chunks.")
 
-    vectorstore = FAISS.from_embeddings(list(zip(all_texts, all_embeddings)), embeddings, metadatas=metadatas)
-    logging.info("Created FAISS vectorstore from embeddings.")
+    vectorstore = FAISS.from_embeddings(
+        list(zip(all_texts, all_embeddings)),
+        embeddings,
+        metadatas=metadatas
+    )
+    logging.info("Created FAISS vector store from embeddings.")
     return vectorstore
 
-def create_rag_chain(vectorstore, llm):
+
+def create_retriever_tool(vectorstore):
     """
-    Create a RetrievalQA chain using the given vectorstore and llm.
-    Assumes system prompt and conversation flow logic are already in the chain prompt.
+    Build a RetrievalQA chain and wrap it as a Tool for the Agent.
     """
-    prompt_template = """You are a helpful company info assistant. 
-You have the following instructions:
-1. Present a brief company overview (max 2 sentences)
-2. Then ask if the user wants to know more.
-3. If yes, retrieve relevant info from the knowledge base (the provided context).
-4. Offer to send the company profile via email.
-5. If the user agrees, ask for their email address using the exact phrase: "Please provide your email address."
-6. Use the context from the vector store for accurate info.
+    prompt_template = """You are a helpful assistant with access to a company knowledge base.
+Use the context from the knowledge base to accurately answer questions about the company.
 
 Context:
 {context}
 
-User Question:
+Question:
 {question}
 
-Answer:"""
-
+Answer concisely:
+    """
     prompt = PromptTemplate(
         input_variables=["context", "question"],
         template=prompt_template
     )
 
-    retriever = vectorstore.as_retriever()
-    rag_chain = RetrievalQA.from_chain_type(
-        llm=llm,
+    qa_chain = RetrievalQA.from_chain_type(
+        llm=ChatOpenAI(model_name="gpt-4o-mini", openai_api_key=api_key(), temperature=0),
         chain_type="stuff",
-        retriever=retriever,
-        return_source_documents=False,
-        chain_type_kwargs={"prompt": prompt}
+        retriever=vectorstore.as_retriever(),
+        chain_type_kwargs={"prompt": prompt},
     )
-    logging.info("Created RetrievalQA chain.")
-    return rag_chain
 
-def send_email(email_address):
-    """
-    Mock sending email. Replace this with actual email-sending logic.
-    """
-    logging.info(f"Sending company profile to {email_address}...")
-    # Implement actual email sending logic here
-    time.sleep(2)  # Simulate email sending delay
-    logging.info("Email sent successfully.")
-
-def is_valid_email(email):
-    """
-    Validate the email address using a simple regex.
-    """
-    regex = r'^[\w\.-]+@[\w\.-]+\.\w+$'
-    return re.match(regex, email) is not None
-
-class CompanyChatBot:
-    def __init__(self, vectorstore):
-        self.llm = ChatOpenAI(model_name="gpt-4", openai_api_key=api_key())
-        self.chain = create_rag_chain(vectorstore, self.llm)
-        self.conversation_history = []
-        self.waiting_for_email = False
-        logging.info("Initialized CompanyChatBot.")
-
-    def process_user_message(self, user_message):
+    def _search_company_info(query: str) -> str:
         """
-        Process the user's message and generate an appropriate response.
+        This function is called when the Agent decides to 
+        query the knowledge base about company info.
         """
-        logging.info(f"Processing user message: {user_message}")
+        return qa_chain.run(query)
 
-        # Handle explicit commands first
-        explicit_commands = [
-            "send me profile via email",
-            "send profile to my email",
-            "email me the profile",
-            "send me the company profile",
-            "send me profile via email",
-            "can you send me the profile",
-            "send me the profile via email",
-            "please send me the profile via email",
-            "could you send me the profile via email",
-            "i would like to receive the profile via email",
-            "send profile via email",
-            "send me the profile by email"
-        ]
+    return Tool(
+        name="Search Company Knowledge Base",
+        func=_search_company_info,
+        description=(
+            "Use this tool to answer questions about the company, "
+            "retrieve data from the PDF knowledge base, etc. "
+            "Input: any question about the company."
+        ),
+    )
 
-        if user_message.lower() in explicit_commands:
-            self.waiting_for_email = True
-            response = "Sure! Could you please provide your email address?"
-            logging.info("Triggering email prompt due to explicit command.")
-            self.conversation_history.append(("user", user_message))
-            self.conversation_history.append(("assistant", response))
+
+def send_email_tool(email_address: str) -> str:
+    """
+    Mock function to simulate sending email with company profile.
+    Replace with your real email-sending logic if needed.
+    """
+    pattern = r'^[\w\.-]+@[\w\.-]+\.\w+$'
+    if not re.match(pattern, email_address.strip()):
+        return "That doesn't look like a valid email format. Please provide a valid email address."
+
+    logging.info(f"Sending the company profile to {email_address} (mock).")
+    time.sleep(2)  # simulating a delay
+    return f"The company profile has been sent to {email_address}."
+
+
+def initialize_agentic_bot(pdf_path="company_profile.pdf", store_path="my_vectorstore"):
+    """
+    Load/update the FAISS store, build Tools, and create a conversational Agent 
+    that can either provide info or send an email, while keeping the conversation going.
+    """
+    # ---- Step 1: Load / check VectorStore ----
+    hash_path = os.path.join(store_path, "hash.txt")
+    pdf_hash = file_hash(pdf_path)
+    saved_hash = None
+
+    if os.path.exists(store_path) and os.path.exists(hash_path):
+        with open(hash_path, "r") as f:
+            saved_hash = f.read().strip()
+
+    if pdf_hash != saved_hash or not os.path.exists(store_path):
+        if not os.path.exists(store_path):
+            os.makedirs(store_path, exist_ok=True)
+        vectorstore = load_and_process_local_pdf(pdf_path)
+        vectorstore.save_local(store_path)
+        with open(hash_path, "w") as f:
+            f.write(pdf_hash)
+    else:
+        embeddings = OpenAIEmbeddings(openai_api_key=api_key())
+        vectorstore = FAISS.load_local(
+            store_path,
+            embeddings,
+            allow_dangerous_deserialization=True
+        )
+
+    # ---- Step 2: Create Tools ----
+    search_tool = create_retriever_tool(vectorstore)
+    email_tool = Tool(
+        name="Send Email",
+        func=send_email_tool,
+        description=(
+            "Use this tool to send the company profile via email. "
+            "Input: a valid email address as a string."
+        ),
+    )
+
+    # ---- Step 3: Customize Agent's system message to keep conversation going ----
+    # This 'prefix' or 'system_message' instructs the agent to be proactive:
+    system_prefix = """You are an AI assistant that can do two main tasks:
+1) Provide or retrieve information about the company from a knowledge base.
+2) Send the company profile via email.
+
+You must keep the conversation going if the user does not explicitly end it. 
+- If the user might want more info, offer it.
+- If the user mentions or requests an email, confirm or ask for the address, then call the "Send Email" tool.
+- If the user has a question about the company, call "Search Company Knowledge Base" to find an answer.
+- Stay friendly and helpful. 
+"""
+
+    llm = ChatOpenAI(model_name="gpt-4o-mini", openai_api_key=api_key(), temperature=0)
+    memory = ConversationBufferMemory(memory_key="chat_history", return_messages=True)
+
+    agent = initialize_agent(
+        tools=[search_tool, email_tool],
+        llm=llm,
+        agent=AgentType.CONVERSATIONAL_REACT_DESCRIPTION,
+        memory=memory,
+        verbose=True,
+        agent_kwargs={
+            "system_message": system_prefix
+        },
+    )
+
+    return agent
+
+
+# Optional: A wrapper class for convenience, similar to your original approach
+class CompanyAgentBot:
+    """
+    A wrapper around the agent for easier usage from websocket.py.
+    """
+    def __init__(self, agent):
+        self.agent = agent
+
+    def process_message(self, user_input: str) -> str:
+        try:
+            response = self.agent.run(user_input)
             return response
-
-        if self.waiting_for_email:
-            email = user_message.strip()
-            if is_valid_email(email):
-                try:
-                    send_email(email)
-                    response = "Great! The company profile has been sent to your email address."
-                    logging.info(f"Email sent to: {email}")
-                except Exception as e:
-                    response = "Sorry, there was an error sending the email. Please try again later."
-                    logging.error(f"Error sending email to {email}: {e}")
-                self.waiting_for_email = False
-            else:
-                response = "That doesn't look like a valid email. Please provide a valid email address."
-                logging.warning(f"Invalid email provided: {email}")
-            self.conversation_history.append(("user", user_message))
-            self.conversation_history.append(("assistant", response))
-            return response
-
-        # Normal RAG response
-        answer = self.chain.run(user_message)
-        logging.info(f"Assistant response: {answer}")
-        self.conversation_history.append(("user", user_message))
-        self.conversation_history.append(("assistant", answer))
-
-        # Enhanced trigger detection using regex
-        email_prompt_patterns = [
-            r"please provide your email",
-            r"what is your email address",
-            r"could you please provide your email",
-            r"may i have your email",
-            r"please share your email",
-            r"provide your email",
-            r"send you the profile via email",
-            r"send the profile via email",
-            r"send it via email",
-            r"email me the profile",
-            r"send the profile to my email"
-        ]
-
-        for pattern in email_prompt_patterns:
-            if re.search(pattern, answer, re.IGNORECASE):
-                self.waiting_for_email = True
-                logging.info("Triggering email prompt based on assistant response.")
-                break
-
-        return answer
+        except Exception as e:
+            logging.error(f"Error in agent run: {e}")
+            return f"Sorry, an error occurred: {e}"
